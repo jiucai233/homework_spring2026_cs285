@@ -20,7 +20,7 @@ from hw1_imitation.data import (
     load_pusht_zarr,
 )
 from hw1_imitation.model import build_policy, PolicyType
-from hw1_imitation.evaluation import Logger
+from hw1_imitation.evaluation import Logger,evaluate_policy
 
 LOGDIR_PREFIX = "exp"
 
@@ -88,7 +88,13 @@ def config_to_dict(config: TrainConfig) -> dict[str, Any]:
 
 def run_training(config: TrainConfig) -> None:
     set_seed(config.seed)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
     print(f"Using device: {device}")
 
     zarr_path = download_pusht(config.data_dir)
@@ -126,9 +132,28 @@ def run_training(config: TrainConfig) -> None:
         project=config.wandb_project, config=config_to_dict(config), name=exp_name
     )
     logger = Logger(log_dir)
-
     ### TODO: PUT YOUR MAIN TRAINING LOOP HERE ###
-
+    optimizer = torch.optim.Adam(model.parameters(),lr=config.lr)
+    model = torch.compile(model)
+    global_step = 0
+    for epoch in range(config.num_epochs):
+        model.train()
+        for batch in loader:
+            state, data_action = [x.to(device)for x in batch]
+            optimizer.zero_grad(set_to_none=True)
+            loss = model.compute_loss(state, data_action)
+            loss.backward()
+            optimizer.step()
+            
+            if global_step % config.log_interval == 0:
+                logger.log({"train/loss": loss.item()}, step=global_step)
+            
+            if global_step % config.eval_interval == 0:
+                evaluate_policy(model, normalizer, device, config.chunk_size, config.video_size, config.num_video_episodes, config.flow_num_steps, step=global_step, logger=logger)
+                model.train()
+                
+            global_step += 1
+        print(f"Epoch {epoch}: Loss = {loss.item()}")
     logger.dump_for_grading()
 
 
